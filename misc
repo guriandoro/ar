@@ -1,0 +1,161 @@
+# WARNING: these are all random commands used throughout postprocessing. Don't use them, they are just for reference.
+
+SELECT hex(commit) FROM percona_server_launchpad_commits limit 1\G
+
+SET @count := 0;
+SELECT @count := @count + 1 AS id, file_name    
+  INTO OUTFILE './ar_percona_server_modules_vertices.csv'   
+  FIELDS TERMINATED BY ',' OPTIONALLY ENCLOSED BY '"'   
+  LINES TERMINATED BY '\n' 
+FROM percona_server_modules GROUP BY file_name;
+
+SELECT file_name, dependency_module_file_name 
+  INTO OUTFILE './ar_percona_server_modules_edges-innobase.csv' 
+  FIELDS TERMINATED BY ',' 
+  OPTIONALLY ENCLOSED BY '"' 
+  LINES TERMINATED BY '\n' 
+FROM percona_server_modules
+WHERE file_name LIKE './storage/innobase%';
+
+SELECT files_changed, ps_bug_number
+  INTO OUTFILE './ar_percona_server_jira.csv' 
+  FIELDS TERMINATED BY ',' 
+  OPTIONALLY ENCLOSED BY '"' 
+  LINES TERMINATED BY '\n' 
+FROM percona_server_jira_commits;
+
+SELECT files_changed, lp_bug_number
+  INTO OUTFILE './ar_percona_server_launchpad.csv' 
+  FIELDS TERMINATED BY ',' 
+  OPTIONALLY ENCLOSED BY '"' 
+  LINES TERMINATED BY '\n' 
+FROM percona_server_launchpad_commits;
+
+
+SELECT file_name, dependency_module_file_name 
+  INTO OUTFILE './ar_percona_server_modules_edges-with-bugs.csv' 
+  FIELDS TERMINATED BY ',' 
+  OPTIONALLY ENCLOSED BY '"' 
+  LINES TERMINATED BY '\n' 
+FROM percona_server_modules
+WHERE (file_name IN (SELECT files_changed FROM percona_server_jira_commits)
+       OR file_name IN (SELECT files_changed FROM percona_server_launchpad_commits)
+       )
+; 
+-- 4345
+
+SELECT file_name, dependency_module_file_name 
+  INTO OUTFILE './ar_percona_server_modules_edges.csv' 
+  FIELDS TERMINATED BY ',' 
+  OPTIONALLY ENCLOSED BY '"' 
+  LINES TERMINATED BY '\n' 
+FROM percona_server_modules
+;
+-- 19581
+
+SELECT file_name, severity 
+  INTO OUTFILE './ar_percona_server_severities.csv' 
+  FIELDS TERMINATED BY ',' 
+  OPTIONALLY ENCLOSED BY '"' 
+  LINES TERMINATED BY '\n' 
+FROM percona_server_file_severity
+ORDER BY file_name ASC
+;
+
+SELECT file_name, severity_sum
+  INTO OUTFILE './ar_percona_server_severity_sums.csv'
+  FIELDS TERMINATED BY ',' 
+  OPTIONALLY ENCLOSED BY '"' 
+  LINES TERMINATED BY '\n' 
+FROM percona_server_file_severity_sums
+ORDER BY file_name ASC
+;
+
+Check modules with duplicate filename 
+--
+create table tmp_module_names (`file_name` varchar(255));
+insert into tmp_module_names select distinct(file_name) from percona_server_modules order by file_name asc;
+
+create table tmp_module_names_no_path (file_name varchar(255), unique key uqf(file_name));
+
+./use ar -e "drop table tmp_module_names_no_path; create table tmp_module_names_no_path (file_name varchar(255), unique key uqf(file_name));"
+echo > /tmp/ar_errores.out;
+./use ar -BNe "select * from tmp_module_names order by file_name asc" | while read full_file_name; do {      
+    file_name=`echo $full_file_name | sed -e 's/.*\///g'`;
+    ./use ar -e "insert into tmp_module_names_no_path values ('${file_name}')" >>/tmp/ar_errores.out 2>&1;
+    echo $file_name" "$full_file_name >> /tmp/ar_errores.out;
+} done;
+
+cat /tmp/ar_errores.out | grep -A1 ERROR | grep -v ERROR | grep -v "\-\-" > ~/errores_ar.1
+
+./use ar -e "drop table tmp_module_names_no_path; create table tmp_module_names_no_path (file_name varchar(255), unique key uqf(file_name));"
+echo > /tmp/ar_errores.out;
+./use ar -BNe "select * from tmp_module_names order by file_name desc" | while read full_file_name; do {      
+    file_name=`echo $full_file_name | sed -e 's/.*\///g'`;
+    ./use ar -e "insert into tmp_module_names_no_path values ('${file_name}')" >>/tmp/ar_errores.out 2>&1;
+    echo $file_name" "$full_file_name >> /tmp/ar_errores.out;
+} done;
+
+cat /tmp/ar_errores.out | grep -A1 ERROR | grep -v ERROR | grep -v "\-\-" > ~/errores_ar.2
+
+cat ~/errores_ar.* | sort | uniq > ~/errores_ar_dupe_mods.out
+
+./use ar -e "create table dupe_modules (file_name varchar(255));"
+cat ~/errores_ar_dupe_mods.out | while read file_name; do {
+    ./use ar -e "insert into dupe_modules values ('${file_name}')";
+} done;
+
+select * from  dupe_modules dm left join percona_server_file_severity ps on ps.file_name = dm.file_name;
+
+
+# duplicated modules with sev > 0
+mysql [localhost:22389] {msandbox} (ar) > select ps.* from percona_server_file_severity ps join dupe_modules dm on ps.file_name = dm.file_name;
++------+-----------------------------------------------------------------------+----------+
+| id   | file_name                                                             | severity |
++------+-----------------------------------------------------------------------+----------+
+|  655 | ./client/dump/program.cc                                              |        2 |
+|  739 | ./plugin/audit_log/buffer.c                                           |        2 |
+| 2018 | ./plugin/audit_log/logger.h                                           |        2 |
+|  825 | ./plugin/innodb_memcached/daemon_memcached/daemon/memcached.c         |        2 |
+|  826 | ./plugin/innodb_memcached/daemon_memcached/daemon/topkeys.c           |        2 |
+|  846 | ./plugin/innodb_memcached/daemon_memcached/include/memcached/engine.h |        2 |
+|  828 | ./plugin/innodb_memcached/innodb_memcache/cache-src/default_engine.c  |        2 |
+|  829 | ./plugin/innodb_memcached/innodb_memcache/include/hash_item_util.h    |        2 |
+|  451 | ./plugin/query_response_time/plugin.cc                                |       26 |
+|  273 | ./sql/field.h                                                         |        7 |
+|  756 | ./storage/rocksdb/logger.h                                            |        2 |
++------+-----------------------------------------------------------------------+----------+
+11 rows in set (0.00 sec)
+
+./use ar -BNe "select concat('UPDATE percona_server_file_severity SET severity = 0 WHERE file_name = \'',ps.file_name,'\';') from percona_server_file_severity ps join dupe_modules dm on ps.file_name = dm.file_name;"
+
+UPDATE percona_server_file_severity SET severity = 1 WHERE file_name = './client/dump/program.cc';
+UPDATE percona_server_file_severity SET severity = 1 WHERE file_name = './plugin/audit_log/buffer.c';
+UPDATE percona_server_file_severity SET severity = 1 WHERE file_name = './plugin/audit_log/logger.h';
+UPDATE percona_server_file_severity SET severity = 1 WHERE file_name = './plugin/innodb_memcached/daemon_memcached/daemon/memcached.c';
+UPDATE percona_server_file_severity SET severity = 1 WHERE file_name = './plugin/innodb_memcached/daemon_memcached/daemon/topkeys.c';
+UPDATE percona_server_file_severity SET severity = 1 WHERE file_name = './plugin/innodb_memcached/daemon_memcached/include/memcached/engine.h';
+UPDATE percona_server_file_severity SET severity = 1 WHERE file_name = './plugin/innodb_memcached/innodb_memcache/cache-src/default_engine.c';
+UPDATE percona_server_file_severity SET severity = 1 WHERE file_name = './plugin/innodb_memcached/innodb_memcache/include/hash_item_util.h';
+UPDATE percona_server_file_severity SET severity = 6 WHERE file_name = './plugin/query_response_time/plugin.cc';
+UPDATE percona_server_file_severity SET severity = 3 WHERE file_name = './sql/field.h';
+UPDATE percona_server_file_severity SET severity = 1 WHERE file_name = './storage/rocksdb/logger.h';
+
+# Remove path and extension, leaving filename only
+cat /Users/agustin/Documents/fac/ar/lab/csv/ar_percona_server_modules_edges-with-bugs.csv | sed -e 's/.*\/\(.*,.*\)/"\1/g' | sed -e 's/\..*",/",/g' | sed -e 's/\(.*,"\).*\/\(.*\)/\1\2/g' | sed -e 's/\..*"$/"/g'
+
+# same
+cat /Users/agustin/Documents/fac/ar/lab/csv/ar_percona_server_severities.csv | sed -e 's/.*\/\(.*",\)/"\1/g' | sed -e 's/\..*"/"/g' | sort > /Users/agustin/Documents/fac/ar/lab/csv/ar_percona_server_severities_no-path_no-extension_duplicates.csv
+
+# remove quotes and commas, substitute for space
+cat ar_percona_server_severities_no-path_no-extension_duplicates.csv | sed -e 's/,/ /g' | sed -e 's/"//g' > ar_percona_server_severities_no-path_no-extension_duplicates.out
+
+# add duplicates
+./use ar -e "create table percona_server_file_severity_sums (file_name varchar(255), severity_sum int, unique key uks(file_name))"
+cat ~/ar_percona_server_severities_no-path_no-extension_duplicates.out | { 
+    while read line; do {
+      file_name=`echo $line | awk '{print $1}'`;
+      sev=`echo $line | awk '{print $2}'`;
+      ./use ar -e "insert into percona_server_file_severity_sums values ('${file_name}',${sev}) on duplicate key update severity_sum=severity_sum+${sev};"
+} done;
+}
